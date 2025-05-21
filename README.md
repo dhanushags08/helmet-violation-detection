@@ -1,9 +1,8 @@
-
 # 🚨 Helmet Violation & Number Plate Detection System
 
 This project is an automated traffic law enforcement system that detects helmet violations and extracts number plate text using **YOLOv8** and **EasyOCR**. It also logs the information in a MongoDB database and sends e-challans to violators via **Twilio (SMS)** and **email with PDF**.
 
-GitHub Repository: [https://github.com/samarth1401/final_year_project.git](https://github.com/samarth1401/final_year_project.git)
+GitHub Repository: [https://github.com/dhanushags08/helmet-violation-detection.git](https://github.com/dhanushags08/helmet-violation-detection.git)
 
 ---
 
@@ -34,7 +33,7 @@ GitHub Repository: [https://github.com/samarth1401/final_year_project.git](https
 ### ✅ Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/samarth1401/final_year_project.git
+git clone https://github.com/dhanushags08/helmet-violation-detection.git
 cd final_year_project
 ```
 
@@ -47,11 +46,13 @@ python -m venv .venv
 #### Activate the Virtual Environment
 
 - **For Windows**:
+
 ```bash
 .venv\Scripts\activate
 ```
 
 - **For Linux/Mac**:
+
 ```bash
 source .venv/bin/activate
 ```
@@ -76,6 +77,7 @@ pymongo
 python-dotenv
 twilio
 fpdf
+razorpay
 ```
 
 ---
@@ -93,6 +95,10 @@ TWILIO_AUTH_TOKEN=your_twilio_auth_token
 TWILIO_PHONE=your_twilio_registered_number
 EMAIL_ID=your_email@gmail.com
 EMAIL_PASS=your_email_password_or_app_password
+
+RAZORPAY_KEY_ID=your_key_id
+RAZORPAY_KEY_SECRET=your_key_secret
+
 ```
 
 > ⚠️ Use app-specific password if 2FA is enabled for your email.
@@ -140,5 +146,3 @@ final_year_project/
 3. Extract number plate using EasyOCR.
 4. Log the data into MongoDB.
 5. Generate PDF challan and send it via Email and SMS.
-
-

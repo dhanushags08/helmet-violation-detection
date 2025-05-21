@@ -20,8 +20,12 @@ import logging
 import warnings
 from fpdf import FPDF
 from email.mime.application import MIMEApplication
+import razorpay
 
 
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 
 # Suppress warnings and logs
@@ -132,6 +136,30 @@ def detect_and_display(frame, timestamp=None):
 
     return frame, detected_numbers
 
+def generate_payment_link(name, email, contact, amount, challan_id):
+    try:
+        response = razorpay_client.payment_link.create({
+            "amount": amount * 100,  # Amount in paise
+            "currency": "INR",
+            "accept_partial": False,
+            "description": f"Helmet Violation Challan - {challan_id}",
+            "customer": {
+                "name": name,
+                "email": email,
+                "contact": contact
+            },
+            "notify": {
+                "sms": False,
+                "email": False
+            },
+            "callback_url": "https://your-app.com/payment-success",
+            "callback_method": "get"
+        })
+        return response['short_url']
+    except Exception as e:
+        print(f"Razorpay link error: {e}")
+        return None
+
 def generate_challan_pdf(challan_doc, user):
     pdf = FPDF()
     pdf.add_page()
@@ -208,10 +236,13 @@ def send_email(to_email, plate, fine_amount, previous_fine, total_due, challan_d
         <p><strong>Total Due:</strong> Rs.{total_due}</p>
         <p><strong>Location:</strong> MG Road, Bengaluru</p>
         <p><strong>Date & Time:</strong> {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <br>
+        <p><strong>Pay Now:</strong> <a href="{challan_doc.get('payment_link', '#')}">{challan_doc.get('payment_link', '#')}</a></p>
         """
+
         msg.attach(MIMEText(body, 'html'))
 
-        # attach pdf
+        # attach PDF
         pdf_path = generate_challan_pdf(challan_doc, user)
         with open(pdf_path, "rb") as f:
             part = MIMEApplication(f.read(), _subtype="pdf")
@@ -229,7 +260,7 @@ def send_email(to_email, plate, fine_amount, previous_fine, total_due, challan_d
 
 
 # ✅ SMS sender
-def send_sms(to_phone, plate, fine_amount, previous_fine, total_due):
+def send_sms(to_phone, plate, fine_amount, previous_fine, total_due, payment_link):
     try:
         if not to_phone.startswith('+91'):
             to_phone = '+91' + to_phone
@@ -238,7 +269,8 @@ def send_sms(to_phone, plate, fine_amount, previous_fine, total_due):
             body=(
                 f"Traffic Violation (No Helmet)\n"
                 f"Plate: {plate}\n"
-                f"Fine: Rs.{fine_amount}, Prev: Rs.{previous_fine}, Total: Rs.{total_due}"
+                f"Fine: Rs.{fine_amount}, Prev: Rs.{previous_fine}, Total: Rs.{total_due}\n"
+                f"Pay Now: {payment_link}"
             ),
             from_=TWILIO_FROM,
             to=to_phone
@@ -263,22 +295,25 @@ def create_challan(plate, violation_frame=None):
         "user": user_id,
         "violation_datetime": {"$gte": start_of_day, "$lte": end_of_day}
     })
-    if count_today >= 9000:
+    if count_today >= 50:
         st.warning(f"⚠️ Max 5 challans already issued today for {plate}")
         return
 
     previous_challans = list(challans_collection.find({"user": user_id}))
     previous_fine = sum(ch["fine_amount"] for ch in previous_challans if not ch.get("is_paid", False))
+    total_due = previous_fine + 500
     image_path = f"detected_numbers/violation_{plate}_{now.strftime('%Y%m%d%H%M%S')}.jpg"
+    
     if violation_frame is not None:
         cv2.imwrite(image_path, violation_frame)
 
+    # Insert challan first without payment link
     challan_doc = {
         "user": user_id,
         "vehicle_no": user["vehicle_no"],
         "fine_amount": 500,
         "previous_fine_amount": previous_fine,
-        "total_fine_due": previous_fine + 500,
+        "total_fine_due": total_due,
         "violation_type": "No Helmet",
         "violation_datetime": now,
         "image_path": image_path,
@@ -293,11 +328,38 @@ def create_challan(plate, violation_frame=None):
     }
 
     inserted = challans_collection.insert_one(challan_doc)
+
+    # Now generate Razorpay payment link using the inserted ID
+    payment_url = generate_payment_link(
+        name=user.get("name", "Citizen"),
+        email=user["email"],
+        contact=user["phone_no"],
+        amount=total_due,
+        challan_id=inserted.inserted_id
+    )
+
+    # Update the challan with payment link
+    challans_collection.update_one(
+        {"_id": inserted.inserted_id},
+        {"$set": {"payment_link": payment_url}}
+    )
+
+    # Fetch updated challan
     created_challan = challans_collection.find_one({"_id": inserted.inserted_id})
 
-    # send_sms(user["phone_no"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"])
-    send_email(user["email"], plate, challan_doc["fine_amount"], challan_doc["previous_fine_amount"], challan_doc["total_fine_due"], challan_doc, user)
+    # Send SMS and Email
+    send_sms(
+    user["phone_no"],
+    plate,
+    created_challan["fine_amount"],
+    created_challan["previous_fine_amount"],
+    created_challan["total_fine_due"],
+    created_challan.get("payment_link", "")
+)
 
+    send_email(user["email"], plate, created_challan["fine_amount"], created_challan["previous_fine_amount"], created_challan["total_fine_due"], created_challan, user)
+
+    # UI Display
     st.success(f"✅ Challan created for {plate}")
     st.markdown(f"""
     ### 🚨 Challan Summary
@@ -311,8 +373,10 @@ def create_challan(plate, violation_frame=None):
     - **Date & Time:** {created_challan['violation_datetime'].strftime('%Y-%m-%d %H:%M:%S')}
     - **Location:** {created_challan['location']['address']}
     - **Status:** {created_challan['challan_status']}
+    - **Payment Link:** [Pay Here]({created_challan.get('payment_link', '#')})
     """)
 
+    # PDF
     pdf_path = generate_challan_pdf(created_challan, user)
     with open(pdf_path, "rb") as f:
         st.download_button(
@@ -322,13 +386,14 @@ def create_challan(plate, violation_frame=None):
             mime="application/pdf"
         )
 
+    # Cleanup
     try:
         if os.path.exists(pdf_path):
             os.remove(pdf_path)
         if 'image_path' in created_challan and os.path.exists(created_challan['image_path']):
             os.remove(created_challan['image_path'])
     except Exception as e:
-         st.warning(f"⚠️ Could not delete temporary files: {e}")
+        st.warning(f"⚠️ Could not delete temporary files: {e}")
 
 # ✅ Streamlit UI
 option = st.radio("Choose input type:", ("Image", "Video", "Live Webcam"))
@@ -370,7 +435,14 @@ elif option == "Video":
 
 elif option == "Live Webcam":
     st.info("🔴 Using Mobile IP Webcam")
-    mobile_ip = os.getenv("MOBILE_IP", "http://192.168.1.11:8080/video")
+    
+    default_ip = "http://192.168.9.83:8080/video"
+    mobile_ip = st.text_input("📷 Enter Mobile IP Webcam URL:", default_ip)
+
+    if not mobile_ip.startswith("http"):
+        st.warning("Please enter a valid webcam stream URL (e.g., http://192.168.1.10:8080/video)")
+        st.stop()
+
     cap = cv2.VideoCapture(mobile_ip)
 
     if not cap.isOpened():
@@ -386,14 +458,14 @@ elif option == "Live Webcam":
             if not ret:
                 break
 
-            if frame_count % 10 == 0:
+            if frame_count % 15 == 0:
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 processed_frame, numbers = detect_and_display(frame, timestamp)
                 for num in numbers:
-                    if len(num) >= 5 and difflib.SequenceMatcher(None, num, prev_plate).ratio() < 0.85:
+                    if num not in plate_log:
+                        plate_log.append(num)
                         st.write(f"[LIVE] {timestamp} - Plate: {num}")
-                        create_challan(num,frame)
-                        prev_plate = num
+                        create_challan(num, frame)
                 stframe.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), channels="RGB", width=700)
             else:
                 stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB", width=700)
